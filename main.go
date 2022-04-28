@@ -174,17 +174,13 @@ func Publish2RabbitMqHandler(c *gin.Context) {
 	})
 }
 
-func main() {
-	fmt.Printf("rss-parser")
-
+func ConsumeRabbitMqMessage() {
 	amqpConnection, err := amqp.Dial(os.Getenv(rabbitMqUri))
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer amqpConnection.Close()
-	consumeChannelAmqp, _ = amqpConnection.Channel()
-	defer consumeChannelAmqp.Close()
 
+	consumeChannelAmqp, _ = amqpConnection.Channel()
 	msgs, err := consumeChannelAmqp.Consume(
 		os.Getenv(rabbitMqQueue),
 		"",
@@ -197,15 +193,37 @@ func main() {
 	go func() {
 		for d := range msgs {
 			log.Printf("Received a message: %s", d.Body)
+			var request Request
+			json.Unmarshal(d.Body, &request)
+			log.Println("RSS URL:", request.URL)
+			entries, _ := GetFeedEntries(request.URL)
+			collection := client.Database(
+				os.Getenv(mongoDatabase)).Collection(collectionNameRecipes)
+
+			for _, entry := range entries[2:] {
+				collection.InsertOne(ctx, bson.M{
+					"title":     entry.Title,
+					"thumbnail": entry.Thumbnail.URL,
+					"url":       entry.Link.Href,
+				})
+			}
 		}
 	}()
+}
+
+func main() {
+	fmt.Printf("rss-parser")
+
+	ConsumeRabbitMqMessage()
+	defer amqpConnection.Close()
+	defer consumeChannelAmqp.Close()
 
 	router := gin.Default()
 	router.POST("/parse", ParserHandler)
 	router.POST("/publish", Publish2RabbitMqHandler)
 
 	log.Printf(" [*] Waiting for message. To exit press CYRL+C")
-	err = router.Run(":5500")
+	err := router.Run(":5500")
 	if err != nil {
 		log.Fatalln(err)
 	}
