@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	_ "embed"
 	"encoding/xml"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"io"
 	"log"
 	"net/http"
+	"os"
 )
 
 type (
@@ -31,8 +36,27 @@ type (
 	}
 )
 
-//go:embed reddit.xml
-var xmlByte []byte
+const (
+	mongoUri              = "MONGO_URI"
+	mongoDatabase         = "MONGO_DATABASE"
+	collectionNameRecipes = "recipes"
+)
+
+var (
+	client *mongo.Client
+	ctx    context.Context
+
+	//go:embed reddit.xml
+	xmlByte []byte
+)
+
+func init() {
+	ctx = context.Background()
+	client, _ = mongo.Connect(
+		ctx,
+		options.Client().ApplyURI(os.Getenv(mongoUri)),
+	)
+}
 
 func GetFeedEntries(url string) ([]Entry, error) {
 
@@ -91,6 +115,18 @@ func ParserHandler(c *gin.Context) {
 		})
 		return
 	}
+
+	collection := client.Database(
+		os.Getenv(mongoDatabase)).Collection(collectionNameRecipes)
+
+	for _, entry := range entries[2:] {
+		collection.InsertOne(ctx, bson.M{
+			"title":     entry.Title,
+			"thumbnail": entry.Thumbnail.URL,
+			"url":       entry.Link.Href,
+		})
+	}
+
 	c.JSON(http.StatusOK, entries)
 }
 
