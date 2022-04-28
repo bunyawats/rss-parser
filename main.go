@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"embed"
 	_ "embed"
 	"encoding/json"
 	"encoding/xml"
@@ -12,7 +13,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -36,6 +39,12 @@ type (
 	Request struct {
 		URL string `่json:"url"`
 	}
+
+	Recipe struct {
+		Title     string `json:"title" bson:"title"`
+		Thumbnail string `json:"thumbnail" bson:"thumbnail"`
+		URL       string `json:"url" bson:"url"`
+	}
 )
 
 const (
@@ -52,6 +61,12 @@ var (
 	publishChannelAmqp *amqp.Channel
 	consumeChannelAmqp *amqp.Channel
 	amqpConnection     *amqp.Connection
+
+	//go:embed templates
+	templatesFS embed.FS
+
+	//go:embed assets
+	assetsFS embed.FS
 
 	//go:embed reddit.xml
 	xmlByte []byte
@@ -174,6 +189,29 @@ func Publish2RabbitMqHandler(c *gin.Context) {
 	})
 }
 
+func IndexHandler(c *gin.Context) {
+
+	collection := client.Database(
+		os.Getenv(mongoDatabase)).Collection(collectionNameRecipes)
+	cur, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	defer cur.Close(ctx)
+	recipes := make([]Recipe, 0)
+	for cur.Next(ctx) {
+		var recipe Recipe
+		cur.Decode(&recipe)
+		recipes = append(recipes, recipe)
+	}
+	c.HTML(http.StatusOK, "index.tmpl", gin.H{
+		"recipes": recipes,
+	})
+}
+
 func ConsumeRabbitMqMessage() {
 	amqpConnection, err := amqp.Dial(os.Getenv(rabbitMqUri))
 	if err != nil {
@@ -219,11 +257,23 @@ func main() {
 	defer consumeChannelAmqp.Close()
 
 	router := gin.Default()
+
+	templateFile := template.Must(template.New("").ParseFS(templatesFS, "templates/*.tmpl"))
+
+	fsys, err := fs.Sub(assetsFS, "assets")
+	if err != nil {
+		panic(err)
+	}
+
+	router.SetHTMLTemplate(templateFile)
+	router.StaticFS("/assets", http.FS(fsys))
+
 	router.POST("/parse", ParserHandler)
 	router.POST("/publish", Publish2RabbitMqHandler)
+	router.GET("/dashboard", IndexHandler)
 
 	log.Printf(" [*] Waiting for message. To exit press CYRL+C")
-	err := router.Run(":5500")
+	err = router.Run(":5500")
 	if err != nil {
 		log.Fatalln(err)
 	}
