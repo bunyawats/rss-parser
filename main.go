@@ -47,9 +47,11 @@ const (
 )
 
 var (
-	client      *mongo.Client
-	ctx         context.Context
-	channelAmqp *amqp.Channel
+	client             *mongo.Client
+	ctx                context.Context
+	publishChannelAmqp *amqp.Channel
+	consumeChannelAmqp *amqp.Channel
+	amqpConnection     *amqp.Connection
 
 	//go:embed reddit.xml
 	xmlByte []byte
@@ -66,7 +68,7 @@ func init() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	channelAmqp, _ = amqpConnection.Channel()
+	publishChannelAmqp, _ = amqpConnection.Channel()
 }
 
 func GetFeedEntries(url string) ([]Entry, error) {
@@ -150,7 +152,7 @@ func Publish2RabbitMqHandler(c *gin.Context) {
 		return
 	}
 	data, _ := json.Marshal(request)
-	err := channelAmqp.Publish(
+	err := publishChannelAmqp.Publish(
 		"",
 		os.Getenv(rabbitMqQueue),
 		false,
@@ -175,12 +177,36 @@ func Publish2RabbitMqHandler(c *gin.Context) {
 func main() {
 	fmt.Printf("rss-parser")
 
-	router := gin.Default()
-	router.POST("/parse", ParserHandler)
-	router.POST("/publish", Publish2RabbitMqHandler)
-	err := router.Run(":5500")
+	amqpConnection, err := amqp.Dial(os.Getenv(rabbitMqUri))
 	if err != nil {
 		log.Fatalln(err)
 	}
+	defer amqpConnection.Close()
+	consumeChannelAmqp, _ = amqpConnection.Channel()
+	defer consumeChannelAmqp.Close()
 
+	msgs, err := consumeChannelAmqp.Consume(
+		os.Getenv(rabbitMqQueue),
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	go func() {
+		for d := range msgs {
+			log.Printf("Received a message: %s", d.Body)
+		}
+	}()
+
+	router := gin.Default()
+	router.POST("/parse", ParserHandler)
+	router.POST("/publish", Publish2RabbitMqHandler)
+
+	log.Printf(" [*] Waiting for message. To exit press CYRL+C")
+	err = router.Run(":5500")
+	if err != nil {
+		log.Fatalln(err)
+	}
 }
