@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	_ "embed"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/streadway/amqp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -40,11 +42,14 @@ const (
 	mongoUri              = "MONGO_URI"
 	mongoDatabase         = "MONGO_DATABASE"
 	collectionNameRecipes = "recipes"
+	rabbitMqUri           = "RABBITMQ_URI"
+	rabbitMqQueue         = "RABBITMQ_QUEUE"
 )
 
 var (
-	client *mongo.Client
-	ctx    context.Context
+	client      *mongo.Client
+	ctx         context.Context
+	channelAmqp *amqp.Channel
 
 	//go:embed reddit.xml
 	xmlByte []byte
@@ -56,6 +61,12 @@ func init() {
 		ctx,
 		options.Client().ApplyURI(os.Getenv(mongoUri)),
 	)
+
+	amqpConnection, err := amqp.Dial(os.Getenv(rabbitMqUri))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	channelAmqp, _ = amqpConnection.Channel()
 }
 
 func GetFeedEntries(url string) ([]Entry, error) {
@@ -130,11 +141,43 @@ func ParserHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, entries)
 }
 
+func Publish2RabbitMqHandler(c *gin.Context) {
+	var request Request
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	data, _ := json.Marshal(request)
+	err := channelAmqp.Publish(
+		"",
+		os.Getenv(rabbitMqQueue),
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "application/json",
+			Body:        []byte(data),
+		},
+	)
+	if err != nil {
+		fmt.Println(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Error while publishing to RabbitMQ",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "success",
+	})
+}
+
 func main() {
 	fmt.Printf("rss-parser")
 
 	router := gin.Default()
 	router.POST("/parse", ParserHandler)
+	router.POST("/publish", Publish2RabbitMqHandler)
 	err := router.Run(":5500")
 	if err != nil {
 		log.Fatalln(err)
